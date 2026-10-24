@@ -5,8 +5,13 @@ import (
 	"math/rand/v2"
 )
 
+// PlayerInfo Each player has its own channels:
+// - play:   the referee sends a channel on which the player must answer with its throw
+// - result: the referee tells the player if it won (true) or lost (false)
 type PlayerInfo struct {
-	id int
+	id     int
+	play   chan chan int
+	result chan bool
 }
 
 type MatchResult struct {
@@ -14,16 +19,75 @@ type MatchResult struct {
 	winner   PlayerInfo
 }
 
-func Player(id int, moveChan chan<- int) {
-	move := rand.IntN(2)
-	fmt.Printf("[Player %d] has picked: %d\n", id, move)
-	moveChan <- move
+// Player is a goroutine that lives for the whole tournament.
+// It keeps playing until it loses, or until the coordinator closes its play
+// channel (that means it is the champion).
+func Player(p PlayerInfo, exited chan<- int) {
+	for reply := range p.play {
+		move := rand.IntN(6) // 0..5 fingers
+		fmt.Printf("[Player %d] throws %d\n", p.id, move)
+		reply <- move
+
+		won := <-p.result
+		if !won {
+			fmt.Printf("[Player %d] eliminated\n", p.id)
+			exited <- p.id
+			return
+		}
+	}
+
+	fmt.Printf("[Player %d] I am the champion!\n", p.id)
+	exited <- p.id
+}
+
+// playMatch is the referee of a single match.
+// p1 plays "odds", p2 plays "evens".
+func playMatch(matchIdx int, p1, p2 PlayerInfo, roundNum int, resultChan chan MatchResult) {
+	matchName := fmt.Sprintf("Round %d, Match %d", roundNum, matchIdx+1)
+
+	// private channels: each player answers only to the referee
+	moveChan1 := make(chan int)
+	moveChan2 := make(chan int)
+
+	p1.play <- moveChan1
+	p2.play <- moveChan2
+
+	m1 := <-moveChan1
+	m2 := <-moveChan2
+	sum := m1 + m2
+
+	var winner PlayerInfo
+	var loser PlayerInfo
+
+	if sum%2 == 1 {
+		winner, loser = p1, p2 // odd sum: the odds player wins
+	} else {
+		winner, loser = p2, p1 // even sum: the evens player wins
+	}
+
+	fmt.Printf("[%s] Player %d (odds) %d + Player %d (evens) %d = %d -> Player %d wins\n",
+		matchName, p1.id, m1, p2.id, m2, sum, winner.id)
+
+	// tell both players how it went
+	loser.result <- false
+	winner.result <- true
+
+	// send completion message to the coordinator
+	resultChan <- MatchResult{matchIdx: matchIdx, winner: winner}
 }
 
 func Coord(nPlayers int) {
+	// buffered, so eliminated players can always exit without waiting
+	exited := make(chan int, nPlayers)
+
 	players := make([]PlayerInfo, nPlayers)
 	for i := 0; i < nPlayers; i++ {
-		players[i] = PlayerInfo{id: i + 1}
+		players[i] = PlayerInfo{
+			id:     i + 1,
+			play:   make(chan chan int),
+			result: make(chan bool),
+		}
+		go Player(players[i], exited)
 	}
 
 	roundNum := 1
@@ -39,11 +103,7 @@ func Coord(nPlayers int) {
 
 		// launch matches in parallel
 		for i := 0; i < len(players); i += 2 {
-			matchIdx := i / 2
-			p1 := players[i]
-			p2 := players[i+1]
-
-			go playMatch(matchIdx, p1, p2, roundNum, resultChan)
+			go playMatch(i/2, players[i], players[i+1], roundNum, resultChan)
 		}
 
 		// wait messages of end match reading from channel nMatches times
@@ -56,63 +116,32 @@ func Coord(nPlayers int) {
 		roundNum++
 	}
 
-	fmt.Printf("\n !!! THE WINNER OF THE CHAMPIONSHIP IS %d!\n", players[0].id)
-}
+	// tell the champion that the tournament is over
+	close(players[0].play)
 
-func playMatch(matchIdx int, p1, p2 PlayerInfo, roundNum int, resultChan chan MatchResult) {
-	matchName := fmt.Sprintf("Round %d, Match %d", roundNum, matchIdx+1)
-	moveChan1 := make(chan int, 1)
-	moveChan2 := make(chan int, 1)
-
-	var winner PlayerInfo
-	var loser PlayerInfo
-
-	for {
-		coordMove := rand.IntN(2)
-
-		go Player(p1.id, moveChan1)
-		go Player(p2.id, moveChan2)
-
-		m1 := <-moveChan1
-		m2 := <-moveChan2
-
-		if m1 == m2 {
-			fmt.Printf("[%s] Players picked same move %d vs %d. Replay...\n", matchName, m1, m2)
-			continue
-		}
-
-		if m1 == coordMove {
-			winner, loser = p1, p2
-		} else {
-			winner, loser = p2, p1
-		}
-
-		loserMove := m2
-		if winner.id == p2.id {
-			loserMove = m1
-		}
-
-		fmt.Printf("[%s] Coord has picked %d. Player %d (move %d) beats Player %d (move %d)\n",
-			matchName, coordMove, winner.id, coordMove, loser.id, loserMove)
-		break
+	// wait until every player goroutine has finished
+	for i := 0; i < nPlayers; i++ {
+		<-exited
 	}
 
-	// send completion message
-	resultChan <- MatchResult{matchIdx: matchIdx, winner: winner}
+	fmt.Printf("\n !!! THE WINNER OF THE CHAMPIONSHIP IS %d!\n", players[0].id)
 }
 
 func main() {
 	var nPlayers int
 
 	for {
-		fmt.Print("Enter the number of players (must be an even number): ")
-		_, err := fmt.Scanf("%d", &nPlayers)
-		if err != nil || nPlayers <= 0 {
+		fmt.Print("Enter the number of players (must be a power of 2): ")
+		_, err := fmt.Scanln(&nPlayers)
+		if err != nil {
+			// throw away the rest of the wrong line, otherwise we loop forever
+			var discard string
+			fmt.Scanln(&discard)
 			fmt.Println("Invalid input. Please enter a positive integer.")
 			continue
 		}
 
-		if nPlayers <= 0 || (nPlayers&(nPlayers-1)) != 0 {
+		if nPlayers < 2 || (nPlayers&(nPlayers-1)) != 0 {
 			fmt.Println("The number of players must be a power of 2 (e.g., 2, 4, 8, 16). Try again.")
 			continue
 		}
@@ -120,7 +149,7 @@ func main() {
 		break
 	}
 
-	fmt.Printf("Start heads & tails: %d players (Centralized Solution)\n", nPlayers)
+	fmt.Printf("Start Odds-and-Evens: %d players\n", nPlayers)
 
 	Coord(nPlayers)
 }
