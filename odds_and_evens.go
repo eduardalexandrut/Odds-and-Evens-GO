@@ -134,7 +134,6 @@ func main() {
 		fmt.Print("Enter the number of players (must be a power of 2): ")
 		_, err := fmt.Scanln(&nPlayers)
 		if err != nil {
-			// throw away the rest of the wrong line, otherwise we loop forever
 			var discard string
 			fmt.Scanln(&discard)
 			fmt.Println("Invalid input. Please enter a positive integer.")
